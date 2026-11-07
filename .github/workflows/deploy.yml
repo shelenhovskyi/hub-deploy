@@ -3,9 +3,11 @@
 # The hub's GitHub App can open pull requests here but has no `workflows` permission, so it can
 # never change this file. That is what makes the rule below enforceable even though GitHub Free
 # has no branch protection for private repos:
-#   a push deploys only if every update of `main` since the last deploy was made by you
-#   (directly, or by merging a pull request). Anything else waits for you to run this workflow
-#   by hand from the Actions tab, which counts as your explicit approval.
+#   a push deploys only if every update of `main` since the last deploy was made by an admin of
+#   this repository, that is you (directly, or by merging a pull request). Anything else waits for
+#   an admin to run this workflow by hand from the Actions tab, which counts as explicit approval.
+# Admin, not "the repository owner": for a repo owned by an organization the owner is the
+# organization, which never pushes or merges itself. The App can never be an admin.
 # All checks live in this file on purpose: scripts elsewhere in the repo could be rewritten by the App.
 name: deploy
 
@@ -30,18 +32,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
           EVENT: ${{ github.event_name }}
           ACTOR: ${{ github.actor }}
           TRIGGERING: ${{ github.triggering_actor }}
         run: |
           set -euo pipefail
+          # Fails closed: bots, ex-collaborators and API errors all come out as "not admin".
+          is_admin() {
+            [ "$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission 2>/dev/null || true)" = admin ]
+          }
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            if [ "$ACTOR" != "$OWNER" ] || [ "$TRIGGERING" != "$OWNER" ]; then
-              echo "::error::Only $OWNER can approve a deploy by hand."
+            if ! is_admin "$ACTOR" || ! is_admin "$TRIGGERING"; then
+              echo "::error::Only an admin of this repository can approve a deploy by hand."
               exit 1
             fi
-            echo "Approved by $OWNER by hand."
+            echo "Approved by $TRIGGERING by hand."
             exit 0
           fi
 
@@ -53,23 +58,27 @@ jobs:
           fi
 
           gh api "repos/$REPO/activity?ref=refs/heads/main&per_page=100" > activity.json
+          admins='[]'
+          for login in $(jq -r '[.[].actor.login | select(. != null)] | unique | .[]' activity.json); do
+            if is_admin "$login"; then admins=$(jq -c --arg l "$login" '. + [$l]' <<<"$admins"); fi
+          done
           # >>> gate-jq
           cat > gate.jq <<'JQ'
           reduce .[] as $a ({found: false, bad: []};
             if .found then .
             elif $a.after == $last then .found = true
-            elif $a.actor.login != $owner then .bad += ["\($a.activity_type) by \($a.actor.login) at \($a.after[0:7])"]
+            elif ($admins | index($a.actor.login)) == null then .bad += ["\($a.activity_type) by \($a.actor.login) at \($a.after[0:7])"]
             else . end)
           | if .found then .bad[] else ("last deploy not found in the recent history", .bad[]) end
           JQ
           # <<< gate-jq
-          bad=$(jq -r --arg last "$last" --arg owner "$OWNER" -f gate.jq activity.json)
+          bad=$(jq -r --arg last "$last" --argjson admins "$admins" -f gate.jq activity.json)
           if [ -n "$bad" ]; then
             echo "::error::main changed without your approval since the last deploy. Review the changes, then run this workflow by hand to approve."
             echo "$bad"
             exit 1
           fi
-          echo "Every change since ${last:0:7} came from $OWNER."
+          echo "Every change since ${last:0:7} came from an admin: $(jq -r 'join(", ")' <<<"$admins")."
 
   deploy:
     needs: provenance

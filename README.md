@@ -3,7 +3,7 @@
 Your private hub repository. It deploys your [hub gateway](https://github.com/shelenhovskyi/hub-gateway) to your own Cloudflare account and keeps a history of every change.
 
 - `hub.json` pins the gateway to an exact commit. The hub app proposes updates as pull requests that show the code diff; nothing changes until you merge.
-- `.github/workflows/deploy.yml` deploys on every push to `main`, but only if every change since the last deploy came from you. Otherwise it stops and waits for you to run it by hand from the **Actions** tab.
+- `.github/workflows/deploy.yml` deploys on every push to `main`, but only if every change since the last deploy came from you (an admin of the repository). Otherwise it stops and waits for you to run it by hand from the **Actions** tab.
 
 ## Secrets
 
