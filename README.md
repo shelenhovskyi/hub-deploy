@@ -11,7 +11,7 @@ Set by the hub app, encrypted in your browser before they reach GitHub:
 
 | Secret | What it is |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | A Cloudflare API token from the "Edit Cloudflare Workers" template, limited to your account |
+| `CLOUDFLARE_API_TOKEN` | A Cloudflare API token that can deploy Workers in your account. The hub app creates one when you connect Cloudflare; you can also make one from the "Edit Cloudflare Workers" template |
 | `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID |
 | `ADMIN_TOKEN` | The token the hub app uses to talk to your gateway |
 
