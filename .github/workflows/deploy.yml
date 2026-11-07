@@ -1,0 +1,115 @@
+# Deploys your hub gateway to your Cloudflare account.
+#
+# The hub's GitHub App can open pull requests here but has no `workflows` permission, so it can
+# never change this file. That is what makes the rule below enforceable even though GitHub Free
+# has no branch protection for private repos:
+#   a push deploys only if every update of `main` since the last deploy was made by you
+#   (directly, or by merging a pull request). Anything else waits for you to run this workflow
+#   by hand from the Actions tab, which counts as your explicit approval.
+# All checks live in this file on purpose: scripts elsewhere in the repo could be rewritten by the App.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check who changed main since the last deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ "$ACTOR" != "$OWNER" ] || [ "$TRIGGERING" != "$OWNER" ]; then
+              echo "::error::Only $OWNER can approve a deploy by hand."
+              exit 1
+            fi
+            echo "Approved by $OWNER by hand."
+            exit 0
+          fi
+
+          # A blocked run fails, so the latest successful run is the last real deploy.
+          last=$(gh api "repos/$REPO/actions/workflows/deploy.yml/runs?branch=main&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""')
+          if [ -z "$last" ]; then
+            echo "::error::First deploy: run this workflow by hand from the Actions tab to approve it."
+            exit 1
+          fi
+
+          gh api "repos/$REPO/activity?ref=refs/heads/main&per_page=100" > activity.json
+          # >>> gate-jq
+          cat > gate.jq <<'JQ'
+          reduce .[] as $a ({found: false, bad: []};
+            if .found then .
+            elif $a.after == $last then .found = true
+            elif $a.actor.login != $owner then .bad += ["\($a.activity_type) by \($a.actor.login) at \($a.after[0:7])"]
+            else . end)
+          | if .found then .bad[] else ("last deploy not found in the recent history", .bad[]) end
+          JQ
+          # <<< gate-jq
+          bad=$(jq -r --arg last "$last" --arg owner "$OWNER" -f gate.jq activity.json)
+          if [ -n "$bad" ]; then
+            echo "::error::main changed without your approval since the last deploy. Review the changes, then run this workflow by hand to approve."
+            echo "$bad"
+            exit 1
+          fi
+          echo "Every change since ${last:0:7} came from $OWNER."
+
+  deploy:
+    needs: provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Fetch the pinned gateway
+        run: |
+          set -euo pipefail
+          repo=$(jq -r '.gateway.repo' hub.json)
+          sha=$(jq -r '.gateway.commit' hub.json)
+          if ! [[ "$repo" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ && "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::hub.json must name gateway.repo as owner/name and pin a full 40-character commit."
+            exit 1
+          fi
+          git clone --quiet --filter=blob:none "https://github.com/$repo" gateway
+          git -C gateway checkout --quiet --detach "$sha"
+          echo "Gateway $repo@${sha:0:7}"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      # Secrets are not in the environment of this step, so install scripts can't read them.
+      - name: Install
+        working-directory: gateway
+        run: npm ci
+
+      - name: Deploy
+        working-directory: gateway
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          origin=$(jq -r '.allowedOrigin // "*"' ../hub.json)
+          npx wrangler deploy --var "ALLOWED_ORIGIN:$origin"
+          # Until this runs the new Worker has no token and refuses every call, so it fails closed.
+          printf '%s' "$ADMIN_TOKEN" | npx wrangler secret put ADMIN_TOKEN
