@@ -1,7 +1,7 @@
 {
   "gateway": {
     "repo": "shelenhovskyi/hub-gateway",
-    "commit": "3cdab98ea4743aa56b73ff2dff0a88f5c28c473e"
+    "commit": "ed9a75f1e483e13ee3d2f25c9733a881b7465d28"
   },
   "allowedOrigin": "*"
 }
